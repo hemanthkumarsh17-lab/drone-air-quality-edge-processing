@@ -1,0 +1,454 @@
+back up of raspberry pi codes
+-------------------------------------------------------------------------------
+
+data backup automatically systemd service file
+
+
+top5g@raspberrypi:~$ sudo nano /etc/systemd/system/usb_backup.service
+
+
+
+[Unit]
+Description=USB Auto Backup Service
+After=multi-user.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/usb_backup.py
+Restart=always
+User=top5g
+WorkingDirectory=/home/top5g
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
+
+
+--------------------------------------------------------------------------
+sudo systemctl daemon-reload
+sudo systemctl restart usb_backup.service
+sudo systemctl enable usb_backup.service
+
+
+
+
+sudo systemctl status usb_backup.service
+
+-----------------------------------------------------------------------------
+
+
+python script usb_backup.py
+
+import os
+import shutil
+import time
+import datetime
+import RPi.GPIO as GPIO
+
+# GPIO Setup
+LED_PIN = 22  # RED LED
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(LED_PIN, GPIO.OUT)
+GPIO.output(LED_PIN, GPIO.LOW)  # LED off initially
+
+# Paths
+USB_MOUNT_PATH = "/media/top5g"  # Adjusted for correct USB detection
+SOURCE_FOLDER = "/home/top5g/sensor_data"  # Folder to copy
+
+def find_usb_drive():
+    """Find the mounted USB drive and return its path."""
+    for device in os.listdir(USB_MOUNT_PATH):
+        usb_path = os.path.join(USB_MOUNT_PATH, device)
+        if os.path.ismount(usb_path):
+            return usb_path
+    return None
+
+def copy_files():
+    """Copy files from SOURCE_FOLDER to USB drive with a timestamp."""
+    usb_drive = find_usb_drive()
+
+    if usb_drive:
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        dest_folder = os.path.join(usb_drive, f"backup_{timestamp}")
+
+        try:
+            print(f"Copying {SOURCE_FOLDER} to {dest_folder} ...")
+            shutil.copytree(SOURCE_FOLDER, dest_folder)
+            print("Backup completed successfully!")
+
+            # Turn on LED to indicate success
+            GPIO.output(LED_PIN, GPIO.HIGH)
+            time.sleep(5)  # LED stays on for 5 seconds
+            GPIO.output(LED_PIN, GPIO.LOW)
+
+        except Exception as e:
+            print(f"Error during backup: {e}")
+    else:
+        print("No USB drive found. Waiting for USB device...")
+
+def main():
+    """Continuously check for a USB drive and copy files when detected."""
+    while True:
+        copy_files()
+        time.sleep(10)  # Check every 10 seconds
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nScript interrupted by user.")
+    finally:
+        GPIO.cleanup()  # Cleanup GPIO on exit
+
+
+
+-------------------------------------------------------------
+to be saved at open location
+
+--------------------------------------------------------------------
+code   for shutdown_button.py
+
+
+
+
+import RPi.GPIO as GPIO
+import time
+import os
+
+BUTTON_PIN = 17  # Change to another GPIO pin if needed
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+def shutdown(channel):
+    print("Shutdown button pressed!")
+    time.sleep(2)  # Prevent false triggering
+    os.system("sudo shutdown -h now")
+
+# Detect button press and call shutdown()
+GPIO.add_event_detect(BUTTON_PIN, GPIO.FALLING, callback=shutdown, bouncetime=500)
+
+try:
+    while True:
+        time.sleep(1)  # Keep script running
+except KeyboardInterrupt:
+    pass
+finally:
+    GPIO.cleanup()
+
+
+-------------------------------------------------------------------
+Auto run service for shutdown 
+
+sudo nano /etc/systemd/system/shutdown_button.service
+
+
+
+            
+[Unit]
+Description=Shutdown Button Service
+After=multi-user.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/top5g/shutdown_button.py
+WorkingDirectory=/home/top5g/
+StandardOutput=inherit
+StandardError=inherit
+Restart=alwaysWorkingDirectory=/home/top5g/
+
+User=root
+
+[Install]
+WantedBy=multi-user.target
+
+
+
+-----------------------------------------------------------------------
+Auto main program run
+
+
+sudo nano /etc/systemd/system/final.service
+
+
+
+
+[Unit]
+Description=Run final.py on startup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/top5g/final.py
+WorkingDirectory=/home/top5g/
+StandardOutput=inherit
+StandardError=inherit
+Restart=always
+User=top5g
+Group=top5g
+Environment="PYTHONUNBUFFERED=1"
+
+[Install]
+WantedBy=multi-user.target
+
+------------------------------------
+
+final program
+
+
+dropbox removed
+
+
+import sys
+import os
+import time
+import requests
+import pygame
+import numpy as np
+from scipy.interpolate import griddata
+from colour import Color
+from adafruit_amg88xx import AMG88XX  # Import AMG88XX for thermal sensor
+import busio  # Import busio for I2C
+import board  # Import board for I2C pins on Raspberry Pi
+from PIL import Image, ImageDraw, ImageFont
+import csv
+
+# Append sensor paths
+sys.path.append("/home/top5g/DFRobot_MultiGasSensor/python/raspberrypi")
+sys.path.append("/home/top5g/DFRobot_Ozone/python/raspberrypi")
+sys.path.append("/home/top5g/DFRobot_AirQualitySensor/python/raspberrypi")
+
+from DFRobot_MultiGasSensor import *
+from DFRobot_Ozone import *
+from DFRobot_AirQualitySensor import *
+
+# ThingSpeak API setup
+THINGSPEAK_API_KEY = 'ZYGAEHVOC6AKQ9M1'
+THINGSPEAK_URL = "https://api.thingspeak.com/update"
+
+# Directory setup
+PARENT_DIR = "sensor_data"
+GRAPH_DIR = os.path.join(PARENT_DIR, "graphs")
+THERMAL_DIR = os.path.join(PARENT_DIR, "thermal_images")
+CSV_DIR = os.path.join(PARENT_DIR, "logs")
+
+os.makedirs(GRAPH_DIR, exist_ok=True)
+os.makedirs(THERMAL_DIR, exist_ok=True)
+os.makedirs(CSV_DIR, exist_ok=True)
+
+# Gas Sensor Communication setup
+I2C_1 = 0x01
+gas_sensors = {
+    "NO2": DFRobot_MultiGasSensor_I2C(I2C_1, 0x74),
+    "SO2": DFRobot_MultiGasSensor_I2C(I2C_1, 0x61),
+    "CO": DFRobot_MultiGasSensor_I2C(I2C_1, 0x76)
+}
+
+ozone = DFRobot_Ozone_IIC(0x01, OZONE_ADDRESS_3)
+ozone.set_mode(MEASURE_MODE_AUTOMATIC)
+
+airqualitysensor = DFRobot_AirQualitySensor(I2C_1, 0x19)
+
+# Thermal Imaging setup
+MINTEMP = 26
+MAXTEMP = 32
+COLORDEPTH = 1024
+
+i2c = busio.I2C(board.SCL, board.SDA)
+thermal_sensor = AMG88XX(i2c)
+
+pygame.init()
+lcd = pygame.display.set_mode((240, 240))
+pygame.mouse.set_visible(False)
+lcd.fill((0, 0, 0))
+pygame.display.update()
+
+blue = Color("indigo")
+colors = list(blue.range_to(Color("red"), COLORDEPTH))
+colors = [(int(c.red * 255), int(c.green * 255), int(c.blue * 255)) for c in colors]
+
+points = [(ix // 8, ix % 8) for ix in range(64)]
+grid_x, grid_y = np.mgrid[0:7:32j, 0:7:32j]
+
+def map_value(x, in_min, in_max, out_min, out_max):
+    return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
+
+def setup_gas_sensors():
+    for name, sensor in gas_sensors.items():
+        while not sensor.change_acquire_mode(sensor.INITIATIVE):
+            print(f"Wait acquire mode change for {name}!")
+            time.sleep(1)
+        print(f"Change acquire mode success for {name}!")
+        sensor.set_temp_compensation(sensor.ON)
+        time.sleep(1)
+
+def upload_to_thingspeak(data):
+    try:
+        response = requests.post(THINGSPEAK_URL, data=data)
+        if response.status_code == 200:
+            print("Data uploaded successfully to ThingSpeak!")
+        else:
+            print(f"Error uploading data: {response.status_code}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+# Function to log sensor data in CSV
+def log_sensor_data(timestamp, data):
+    csv_filename = os.path.join(CSV_DIR, f"sensor_data_{timestamp[:8]}.csv")
+    
+    if not os.path.exists(csv_filename) or (time.time() - os.path.getmtime(csv_filename) > 1800):
+        with open(csv_filename, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(["Timestamp", "NO2", "SO2", "CO", "Ozone", "PM2.5", "Thermal Image"])
+
+    with open(csv_filename, 'a', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow([
+            timestamp, data["NO2"], data["SO2"], data["CO"],
+            data["Ozone"], data["PM2.5"], data["Thermal Image"]
+        ])
+
+def main_loop():
+    setup_gas_sensors()
+    
+    while True:
+        try:
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            
+            # Read and display gas sensor data
+            gas_data = {}
+            for name, sensor in gas_sensors.items():
+                concentration = sensor.read_gas_concentration()
+                concentration = max(0, concentration)
+                
+                if name in ["NO2", "SO2"]:
+                    concentration /= 10
+                
+                print(f"Ambient {name} concentration: {concentration:.2f} {sensor.gasunits}, Temp: {sensor.temp:.1f}°C")
+                gas_data[name] = concentration
+
+            # Read Ozone and PM2.5 data
+            ozone_concentration = ozone.get_ozone_data(20)
+            pm2_5 = airqualitysensor.gain_particle_concentration_ugm3(airqualitysensor.PARTICLE_PM2_5_STANDARD)
+            
+            print(f"Ozone concentration: {ozone_concentration:.2f} PPB")  
+            print(f"PM2.5 concentration: {pm2_5:.2f} ug/m³")  
+
+            # Read thermal sensor data
+            pixels = thermal_sensor.pixels
+            pixels = [map_value(p, MINTEMP, MAXTEMP, 0, COLORDEPTH - 1) for row in pixels for p in row]
+            bicubic = griddata(points, pixels, (grid_x, grid_y), method='cubic')
+
+            for ix, row in enumerate(bicubic):
+                for jx, pixel in enumerate(row):
+                    pygame.draw.rect(
+                        lcd,
+                        colors[int(min(max(pixel, 0), COLORDEPTH - 1))],
+                        (jx * 8, ix * 8, 8, 8)
+                    )
+            pygame.display.update()
+
+            image_path = os.path.join(THERMAL_DIR, f"thermal_image_{timestamp}.png")
+            pygame.image.save(lcd, image_path)
+
+            # Upload all data to ThingSpeak (without image URL)
+            data = {
+                'api_key': THINGSPEAK_API_KEY,
+                'field2': ozone_concentration,
+                'field3': gas_data["CO"],
+                'field4': gas_data["NO2"],
+                'field5': pm2_5,
+                'field6': gas_data["SO2"]
+            }
+            upload_to_thingspeak(data)
+
+            # Log sensor data to CSV (store image path locally)
+            log_sensor_data(timestamp, {
+                "NO2": gas_data["NO2"], "SO2": gas_data["SO2"], "CO": gas_data["CO"],
+                "Ozone": ozone_concentration, "PM2.5": pm2_5, "Thermal Image": image_path
+            })
+
+        except Exception as e:
+            print(f"Error: {e}")
+
+        time.sleep(5)
+
+if __name__ == "__main__":
+    main_loop()
+
+----------------------------------------------------------------------------
+
+
+
+power on/off indication 
+
+led_control.py code
+------------------------
+
+
+import RPi.GPIO as GPIO
+import time
+import signal
+import sys
+
+LED_PIN = 25
+
+# GPIO setup
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(LED_PIN, GPIO.OUT)
+GPIO.output(LED_PIN, GPIO.HIGH)  # Turn LED ON
+
+# Handle system shutdown properly
+def shutdown_handler(signal_received, frame):
+    print("Shutting down... Turning LED off")
+    GPIO.output(LED_PIN, GPIO.LOW)  # Turn LED OFF before exit
+    GPIO.cleanup()
+    sys.exit(0)
+
+# Capture termination signals
+signal.signal(signal.SIGTERM, shutdown_handler)
+signal.signal(signal.SIGINT, shutdown_handler)
+
+# Keep running infinitely
+try:
+    while True:
+        time.sleep(1)
+except KeyboardInterrupt:
+    shutdown_handler(None, None)
+----------------------------------------------------------------
+auto-run led_control.py
+
+
+sudo nano /etc/systemd/system/led_control.service
+
+
+[Unit]
+Description=LED Control on Boot
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/top5g/led_control.py
+Restart=always
+User=pi
+
+[Install]
+WantedBy=multi-user.target
+
+
+
+-----------------------------
+sudo systemctl daemon-reload
+sudo systemctl enable led_control.service
+sudo systemctl start led_control.service
+sudo systemctl status led_control.service
+
+
+
+
+
+
+
+
+
+
